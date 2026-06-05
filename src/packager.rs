@@ -1,4 +1,5 @@
 use heapless::Vec as HVec;
+use crate::crc::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -40,7 +41,7 @@ pub fn unpack<const MAX_DATA: usize>(
         return Err(UnpackError::InvalidLength);
     }
 
-    if !crate::crc::is_crc_valid(raw_data) {
+    if !is_crc_valid(raw_data) {
         return Err(UnpackError::CrcMismatch);
     }
 
@@ -107,7 +108,7 @@ pub fn pack<const MAX_DATA: usize, const MAX_PACKET: usize>(
         raw_data.push(b).map_err(|_| PackError::BufferTooSmall)?;
     }
 
-    let crc_val = crate::crc::get_crc8(&raw_data);
+    let crc_val = get_crc8(&raw_data);
     raw_data.push(crc_val).map_err(|_| PackError::BufferTooSmall)?;
 
     Ok(raw_data)
@@ -136,7 +137,6 @@ mod tests {
 
     #[test]
     fn test_unprotected_acknowledgement_response() {
-        fn test_unprotected_acknowledgement_response() {
         // [ADDR][LEN][PAYLOAD...][CRC8] (no key byte in response)
         let raw_data = [0x03, 0x05, 0x12, 0xBA, 0xBA, 0x63];
         
@@ -146,7 +146,6 @@ mod tests {
         assert!(!package.protected);
         assert_eq!(package.address, 0x03);
         assert_eq!(package.data.as_slice(), &[0x12, 0xBA, 0xBA]);
-    }
     }
 
     #[test]
@@ -263,5 +262,44 @@ mod tests {
     fn test_unpack_empty_data() {
         let result: Result<Package<16>, UnpackError> = unpack(&[], Direction::Request, GLOBAL_KEY);
         assert_eq!(result.err(), Some(UnpackError::EmptyData));
+    }
+
+    #[test]
+    fn test_protected_pack() {
+        let package = Package {
+            protected: true,
+            address: 0x02,
+            message_key: 0x0E,
+            data: heapless::Vec::<u8, 32>::try_from([0x0A, 0x04, 0x00].as_slice()).unwrap(),
+        };
+        let packed_data: heapless::Vec<u8, 32> = pack(&package, Direction::Response, GLOBAL_KEY).unwrap();
+        let expected_packet = 
+            heapless::Vec::<u8, 32>::try_from([0x82, 0x05, 0x04, 0x0A, 0x0E, 0xAF].as_slice()).unwrap();
+        assert_eq!(packed_data, expected_packet);
+    }
+
+    #[test]
+    fn test_unpack_valid_request_crypted_packet() {
+        let raw_data = [0x82, 0x06, 0x1C, 0x19, 0x0E, 0x0D, 0xD7]; // Example packet with valid CRC
+        let package: Package<32>  = unpack(&raw_data, Direction::Request, GLOBAL_KEY)
+            .expect("Failed to unpack valid packet");
+        let expected_packet = 
+            heapless::Vec::<u8, 32>::try_from([0x17, 0x00, 0x03].as_slice()).unwrap();
+        assert!(package.protected);
+        assert_eq!(package.address, 0x02);
+        assert_eq!(package.data, expected_packet);
+    }
+
+    #[test]
+    fn test_unpack_valid_response_crypted_packet() {
+        const PRIVATE_KEY: u8 = 0xEB;
+        let raw_data = [0x82, 0x05, 0xEF, 0x20, 0xEB, 0x59]; // Example packet with valid CRC
+        let package: Package<32>  = unpack(&raw_data, Direction::Response, PRIVATE_KEY)
+            .expect("Failed to unpack valid packet");
+        let expected_packet = 
+            heapless::Vec::<u8, 32>::try_from([0x04, 0xCB, 0x00].as_slice()).unwrap();
+        assert!(package.protected);
+        assert_eq!(package.address, 0x02);
+        assert_eq!(package.data, expected_packet);
     }
 }
