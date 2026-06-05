@@ -30,7 +30,7 @@ pub struct Package<const MAX_DATA: usize = 252> {
 pub fn unpack<const MAX_DATA: usize>(
     raw_data: &[u8],
     direction: Direction,
-    private_key: u8,
+    global_key: u8,
 ) -> Result<Package<MAX_DATA>, UnpackError> {
     if raw_data.is_empty() {
         return Err(UnpackError::EmptyData);
@@ -48,17 +48,17 @@ pub fn unpack<const MAX_DATA: usize>(
     let protected = (raw_data[0] >> 7) & 1 == 1;
     let address = raw_data[0] & 0x7F;
 
-    let (message_key, payload_start) = match direction {
+    let (private_key, payload_start) = match direction {
         Direction::Request => {
             if raw_data.len() < 4 {
                 return Err(UnpackError::InvalidLength);
             }
-            let global_key = private_key;
+            let global_key = global_key;
             let msg_key = raw_data[2] ^ global_key;
             (msg_key, 3)
         }
         Direction::Response => {
-            let msg_key = private_key;
+            let msg_key = global_key;
             (msg_key, 2)
         }
     };
@@ -69,14 +69,14 @@ pub fn unpack<const MAX_DATA: usize>(
 
     if protected {
         for byte in data.iter_mut() {
-            *byte ^= message_key;
+            *byte ^= private_key;
         }
     }
 
     Ok(Package {
         protected,
         address,
-        private_key: message_key,
+        private_key,
         data,
     })
 }
@@ -117,21 +117,24 @@ pub fn pack<const MAX_DATA: usize, const MAX_PACKET: usize>(
 mod tests {
     use super::*;
 
-    const GLOBAL_KEY: u8 = 0x12;
+    const PUBLIC_KEY: u8 = 0x12;
 
     #[test]
     fn test_unprotected_key_assignment_request() {
         // [ADDR][LEN][KEY_BYTE][PAYLOAD...][CRC8]
-        let raw_data = [0x03, 0x06, 0x00, 0x11, 0xBA, 0xBA, 0x8D];
+        let mut raw_data: Vec<u8> = Vec::new();
+        raw_data.extend_from_slice(&[0x03, 0x06, 0x00, 0x11, PUBLIC_KEY, PUBLIC_KEY]);
+        raw_data.push(get_crc8(&raw_data));
         
+
         // Specifying MAX_DATA = 16 for the heapless package
-        let package: Package<16> = unpack(&raw_data, Direction::Request, GLOBAL_KEY)
+        let package: Package<16> = unpack(&raw_data, Direction::Request, PUBLIC_KEY)
             .expect("Unpack failed");
 
         assert!(!package.protected);
         assert_eq!(package.address, 0x03);
         assert_eq!(package.private_key, 0x12); // 0x00 ^ GLOBAL_KEY (0x12)
-        assert_eq!(package.data.as_slice(), &[0x11, 0xBA, 0xBA]);
+        assert_eq!(package.data.as_slice(), &[0x11, PUBLIC_KEY, PUBLIC_KEY]);
     }
 
     #[test]
@@ -139,7 +142,7 @@ mod tests {
         // [ADDR][LEN][PAYLOAD...][CRC8] (no key byte in response)
         let raw_data = [0x03, 0x05, 0x12, 0xBA, 0xBA, 0x63];
         
-        let package: Package<16> = unpack(&raw_data, Direction::Response, GLOBAL_KEY)
+        let package: Package<16> = unpack(&raw_data, Direction::Response, PUBLIC_KEY)
             .expect("Unpack failed");
 
         assert!(!package.protected);
@@ -185,7 +188,7 @@ mod tests {
         let raw_data = [0x03, 0x06, 0x00, 0x11, 0xBA, 0xBA, 0x8D];
         
         // Expect failure because raw_data payload (3 bytes) exceeds MAX_DATA (2 bytes)
-        let result: Result<Package<2>, UnpackError> = unpack(&raw_data, Direction::Request, GLOBAL_KEY);
+        let result: Result<Package<2>, UnpackError> = unpack(&raw_data, Direction::Request, PUBLIC_KEY);
         assert_eq!(result.err(), Some(UnpackError::PayloadTooLarge));
     }
 
@@ -210,20 +213,20 @@ mod tests {
     #[test]
     fn test_unpack_invalid_crc() {
         let raw_data = [0x03, 0x06, 0x00, 0x11, 0xBA, 0xBA, 0xFF]; // Invalid CRC (0xFF instead of 0x8D)
-        let result: Result<Package<16>, UnpackError> = unpack(&raw_data, Direction::Request, GLOBAL_KEY);
+        let result: Result<Package<16>, UnpackError> = unpack(&raw_data, Direction::Request, PUBLIC_KEY);
         assert_eq!(result.err(), Some(UnpackError::CrcMismatch));
     }
 
     #[test]
     fn test_unpack_invalid_length() {
         let raw_data = [0x03, 0x09, 0x00, 0x11, 0xBA, 0xBA, 0x8D]; // Length byte claims 10 bytes, actual is 7
-        let result: Result<Package<16>, UnpackError> = unpack(&raw_data, Direction::Request, GLOBAL_KEY);
+        let result: Result<Package<16>, UnpackError> = unpack(&raw_data, Direction::Request, PUBLIC_KEY);
         assert_eq!(result.err(), Some(UnpackError::InvalidLength));
     }
 
     #[test]
     fn test_unpack_empty_data() {
-        let result: Result<Package<16>, UnpackError> = unpack(&[], Direction::Request, GLOBAL_KEY);
+        let result: Result<Package<16>, UnpackError> = unpack(&[], Direction::Request, PUBLIC_KEY);
         assert_eq!(result.err(), Some(UnpackError::EmptyData));
     }
 
@@ -244,7 +247,7 @@ mod tests {
     #[test]
     fn test_unpack_valid_request_crypted_packet() {
         let raw_data = [0x82, 0x06, 0x1C, 0x19, 0x0E, 0x0D, 0xD7]; // Example packet with valid CRC
-        let package: Package<32>  = unpack(&raw_data, Direction::Request, GLOBAL_KEY)
+        let package: Package<32>  = unpack(&raw_data, Direction::Request, PUBLIC_KEY)
             .expect("Failed to unpack valid packet");
         let expected_packet = 
             heapless::Vec::<u8, 32>::try_from([0x17, 0x00, 0x03].as_slice()).unwrap();
